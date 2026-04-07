@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RFP Response Tool — Fiduciary Experts</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com; font-src https://fonts.gstatic.com https://cdnjs.cloudflare.com; connect-src 'self'; img-src 'self' data: blob:;">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="header-left">
+            <img src="assets/fiduciary-experts-logo.png" alt="Fiduciary Experts" class="logo">
+            <div class="header-text">
+                <h1>RFP Response Tool</h1>
+                <p>AI-Powered Proposal Generation</p>
+            </div>
+        </div>
+        <div class="header-right">
+            <button id="btn-export-kb" class="btn btn-outline btn-sm" title="Export Knowledge Base">
+                <i class="fas fa-download"></i> Export KB
+            </button>
+            <button id="btn-import-kb" class="btn btn-outline btn-sm" title="Import Knowledge Base">
+                <i class="fas fa-upload"></i> Import KB
+            </button>
+            <input type="file" id="import-kb-input" accept=".json" style="display:none">
+        </div>
+    </header>
+
+    <!-- Tab Navigation -->
+    <nav class="tabs">
+        <button class="tab active" data-tab="knowledge-base">
+            <i class="fas fa-database"></i>
+            <span>Knowledge Base</span>
+            <span class="badge" id="kb-count">0</span>
+        </button>
+        <button class="tab" data-tab="new-rfp">
+            <i class="fas fa-file-import"></i>
+            <span>New RFP</span>
+        </button>
+        <button class="tab" data-tab="review">
+            <i class="fas fa-edit"></i>
+            <span>Review & Edit</span>
+            <span class="badge hidden" id="response-count">0</span>
+        </button>
+    </nav>
+
+    <!-- Tab 1: Knowledge Base -->
+    <section id="tab-knowledge-base" class="tab-content active">
+        <div class="section-header">
+            <h2>Knowledge Base</h2>
+            <p>Upload past RFP responses to build your answer library. The AI will extract question-answer pairs automatically.</p>
+        </div>
+
+        <!-- Upload Area -->
+        <div class="upload-zone" id="kb-upload-zone">
+            <div class="upload-icon"><i class="fas fa-cloud-upload-alt"></i></div>
+            <p class="upload-title">Upload Past RFP Responses</p>
+            <p class="upload-subtitle">Drag & drop Word (.docx) or PDF files, or click to browse</p>
+            <input type="file" id="kb-file-input" accept=".docx,.pdf" multiple style="display:none">
+        </div>
+
+        <!-- Processing Status -->
+        <div id="kb-processing" class="processing-card hidden">
+            <div class="spinner"></div>
+            <p id="kb-processing-text">Extracting Q&A pairs...</p>
+        </div>
+
+        <!-- Pending Review -->
+        <div id="kb-pending" class="hidden">
+            <div class="section-subheader">
+                <h3>Review Extracted Q&A Pairs</h3>
+                <div class="btn-group">
+                    <button id="btn-approve-all" class="btn btn-primary btn-sm">
+                        <i class="fas fa-check-double"></i> Approve All
+                    </button>
+                    <button id="btn-reject-all" class="btn btn-danger btn-sm">
+                        <i class="fas fa-times"></i> Reject All
+                    </button>
+                </div>
+            </div>
+            <div id="kb-pending-list" class="qa-list"></div>
+        </div>
+
+        <!-- Existing Knowledge Base -->
+        <div class="section-subheader" style="margin-top:2rem">
+            <h3>Saved Q&A Library</h3>
+            <button id="btn-add-manual" class="btn btn-outline btn-sm">
+                <i class="fas fa-plus"></i> Add Manually
+            </button>
+        </div>
+
+        <!-- Search -->
+        <div class="search-bar">
+            <i class="fas fa-search"></i>
+            <input type="text" id="kb-search" placeholder="Search questions or answers...">
+        </div>
+
+        <div id="kb-list" class="qa-list">
+            <div class="empty-state">
+                <i class="fas fa-inbox"></i>
+                <p>No Q&A pairs yet. Upload past RFP responses to get started.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Tab 2: New RFP -->
+    <section id="tab-new-rfp" class="tab-content">
+        <div class="section-header">
+            <h2>Analyze New RFP</h2>
+            <p>Upload an incoming RFP to analyze its requirements and generate tailored responses.</p>
+        </div>
+
+        <!-- Upload Area -->
+        <div class="upload-zone" id="rfp-upload-zone">
+            <div class="upload-icon"><i class="fas fa-file-contract"></i></div>
+            <p class="upload-title">Upload New RFP Document</p>
+            <p class="upload-subtitle">Drag & drop a Word (.docx) or PDF file</p>
+            <input type="file" id="rfp-file-input" accept=".docx,.pdf" style="display:none">
+        </div>
+
+        <!-- Processing -->
+        <div id="rfp-processing" class="processing-card hidden">
+            <div class="spinner"></div>
+            <p id="rfp-processing-text">Analyzing RFP document...</p>
+            <div class="progress-bar">
+                <div class="progress-fill" id="rfp-progress"></div>
+            </div>
+            <p class="progress-label" id="rfp-progress-label"></p>
+        </div>
+
+        <!-- Prospect Analysis -->
+        <div id="rfp-analysis" class="hidden">
+            <div class="analysis-card">
+                <h3><i class="fas fa-chart-line"></i> Prospect Analysis</h3>
+                <div id="rfp-analysis-content"></div>
+            </div>
+
+            <div class="analysis-card">
+                <h3><i class="fas fa-list-ol"></i> Identified Questions (<span id="rfp-question-count">0</span>)</h3>
+                <div id="rfp-questions-list" class="question-preview-list"></div>
+            </div>
+
+            <div class="action-bar">
+                <button id="btn-generate-responses" class="btn btn-primary btn-lg">
+                    <i class="fas fa-magic"></i> Generate Responses
+                </button>
+            </div>
+        </div>
+    </section>
+
+    <!-- Tab 3: Review & Edit -->
+    <section id="tab-review" class="tab-content">
+        <div class="section-header">
+            <h2>Review & Edit Responses</h2>
+            <p>Review generated responses, make edits, and export your final document.</p>
+        </div>
+
+        <!-- No Responses State -->
+        <div id="review-empty" class="empty-state">
+            <i class="fas fa-file-alt"></i>
+            <p>No responses generated yet. Upload and analyze an RFP first.</p>
+        </div>
+
+        <!-- Response Controls -->
+        <div id="review-controls" class="hidden">
+            <div class="review-toolbar">
+                <div class="toolbar-left">
+                    <span id="review-prospect-name" class="prospect-label"></span>
+                    <span class="separator">|</span>
+                    <span id="review-stats"></span>
+                </div>
+                <div class="toolbar-right">
+                    <button id="btn-global-feedback" class="btn btn-outline btn-sm">
+                        <i class="fas fa-comment"></i> Global Feedback
+                    </button>
+                    <button id="btn-export-word" class="btn btn-primary btn-sm">
+                        <i class="fas fa-file-word"></i> Export to Word
+                    </button>
+                </div>
+            </div>
+
+            <!-- Global Feedback Panel -->
+            <div id="global-feedback-panel" class="feedback-panel hidden">
+                <textarea id="global-feedback-text" placeholder="e.g., 'Make all responses more concise' or 'Emphasize our technology capabilities throughout'"></textarea>
+                <div class="btn-group">
+                    <button id="btn-apply-feedback" class="btn btn-primary btn-sm">
+                        <i class="fas fa-sync"></i> Regenerate All
+                    </button>
+                    <button id="btn-cancel-feedback" class="btn btn-outline btn-sm">Cancel</button>
+                </div>
+            </div>
+
+            <!-- Response List -->
+            <div id="review-list" class="response-list"></div>
+        </div>
+    </section>
+
+    <!-- Manual Q&A Modal -->
+    <div id="modal-manual-qa" class="modal hidden">
+        <div class="modal-backdrop"></div>
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modal-qa-title">Add Q&A Pair</h3>
+                <button class="modal-close"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <label>Category</label>
+                <input type="text" id="modal-qa-category" placeholder="e.g., Firm Background, Fees, Investment Philosophy">
+                <label>Question</label>
+                <textarea id="modal-qa-question" rows="3" placeholder="Enter the RFP question..."></textarea>
+                <label>Answer</label>
+                <textarea id="modal-qa-answer" rows="6" placeholder="Enter the response..."></textarea>
+            </div>
+            <div class="modal-footer">
+                <button id="btn-modal-save" class="btn btn-primary">Save</button>
+                <button class="btn btn-outline modal-close">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Export Progress Modal -->
+    <div id="modal-export" class="modal hidden">
+        <div class="modal-backdrop"></div>
+        <div class="modal-content modal-sm">
+            <div class="modal-body" style="text-align:center;padding:2rem">
+                <div class="spinner" style="margin:0 auto 1rem"></div>
+                <p id="export-status">Generating Word document...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- docx library for Word export -->
+    <script src="https://cdn.jsdelivr.net/npm/docx@9.5.0/build/index.umd.min.js"></script>
+    <!-- mammoth for reading Word files -->
+    <script src="https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js"></script>
+    <!-- pdf.js for reading PDFs -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs" type="module"></script>
+
+    <script src="app.js"></script>
+</body>
+</html>
