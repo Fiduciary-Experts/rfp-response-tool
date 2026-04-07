@@ -79,16 +79,13 @@
 
     async function extractTextFromPDF(file) {
         const arrayBuffer = await file.arrayBuffer();
-        const pdfjsLib = window['pdfjs-dist/build/pdf'] || window.pdfjsLib;
+        const pdfjsLib = window.pdfjsLib;
 
         if (!pdfjsLib) {
-            const pdf = await import('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs');
-            pdf.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs';
-            const doc = await pdf.getDocument({ data: arrayBuffer }).promise;
-            return await extractPDFPages(doc);
+            throw new Error('PDF reader failed to load. Please try a Word (.docx) file instead.');
         }
 
-        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs';
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
         const doc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
         return await extractPDFPages(doc);
     }
@@ -384,10 +381,13 @@ ${text.substring(0, 60000)}`;
 
     // ===== Q&A Modal =====
     function initModals() {
+        // Only bind close handlers for non-prompt modals (prompt modal has its own handlers)
         $$('.modal-close').forEach(btn => {
+            if (btn.closest('#modal-prompt')) return;
             btn.addEventListener('click', () => btn.closest('.modal').classList.add('hidden'));
         });
         $$('.modal-backdrop').forEach(bd => {
+            if (bd.closest('#modal-prompt')) return;
             bd.addEventListener('click', () => bd.closest('.modal').classList.add('hidden'));
         });
         $('#btn-modal-save').addEventListener('click', saveQAModal);
