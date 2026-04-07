@@ -1,4 +1,5 @@
 // ===== RFP Response Tool — Fiduciary Experts =====
+// No API key required — uses copy/paste workflow with Claude chat
 
 (function () {
     'use strict';
@@ -8,9 +9,10 @@
         knowledgeBase: JSON.parse(localStorage.getItem('rfp_kb') || '[]'),
         pendingQA: [],
         currentRFP: null,       // { text, fileName }
-        rfpAnalysis: null,      // { prospectProfile, questions }
+        rfpAnalysis: null,      // { profile, questions }
         responses: [],          // [{ question, answer, confidence, source, index }]
-        editingQAId: null
+        editingQAId: null,
+        currentPromptCallback: null  // function to call when user pastes response
     };
 
     // ===== DOM Refs =====
@@ -25,6 +27,7 @@
         initModals();
         initKBExportImport();
         initGlobalFeedback();
+        initPromptModal();
         renderKBList();
         updateKBCount();
     });
@@ -79,7 +82,6 @@
         const pdfjsLib = window['pdfjs-dist/build/pdf'] || window.pdfjsLib;
 
         if (!pdfjsLib) {
-            // Fallback: try dynamic import
             const pdf = await import('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs');
             pdf.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs';
             const doc = await pdf.getDocument({ data: arrayBuffer }).promise;
@@ -101,25 +103,52 @@
         return pages.join('\n\n');
     }
 
-    // ===== Claude API =====
-    async function callClaude(system, userMessage, maxTokens = 4096) {
-        const resp = await fetch('/api/claude', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                system,
-                messages: [{ role: 'user', content: userMessage }],
-                maxTokens
-            })
+    // ===== Prompt Modal (Copy Prompt → Paste Response) =====
+    function initPromptModal() {
+        $('#btn-copy-prompt').addEventListener('click', () => {
+            const promptText = $('#prompt-output').value;
+            navigator.clipboard.writeText(promptText).then(() => {
+                $('#btn-copy-prompt').innerHTML = '<i class="fas fa-check"></i> Copied!';
+                setTimeout(() => {
+                    $('#btn-copy-prompt').innerHTML = '<i class="fas fa-copy"></i> Copy Prompt';
+                }, 2000);
+            });
         });
 
-        if (!resp.ok) {
-            const err = await resp.json().catch(() => ({ error: 'Request failed' }));
-            throw new Error(err.error || 'API request failed');
-        }
+        $('#btn-submit-response').addEventListener('click', () => {
+            const responseText = $('#paste-response').value.trim();
+            if (!responseText) {
+                showToast('Please paste Claude\'s response first', 'error');
+                return;
+            }
+            if (state.currentPromptCallback) {
+                state.currentPromptCallback(responseText);
+                state.currentPromptCallback = null;
+            }
+            $('#modal-prompt').classList.add('hidden');
+            $('#paste-response').value = '';
+        });
 
-        const data = await resp.json();
-        return data.text;
+        // Close handlers
+        $$('#modal-prompt .modal-close').forEach(btn => {
+            btn.addEventListener('click', () => {
+                $('#modal-prompt').classList.add('hidden');
+                state.currentPromptCallback = null;
+            });
+        });
+        $('#modal-prompt .modal-backdrop').addEventListener('click', () => {
+            $('#modal-prompt').classList.add('hidden');
+            state.currentPromptCallback = null;
+        });
+    }
+
+    function showPromptModal(title, stepInfo, prompt, onResponse) {
+        $('#prompt-modal-title').textContent = title;
+        $('#prompt-step-info').textContent = stepInfo;
+        $('#prompt-output').value = prompt;
+        $('#paste-response').value = '';
+        state.currentPromptCallback = onResponse;
+        $('#modal-prompt').classList.remove('hidden');
     }
 
     // ===== Knowledge Base Upload =====
@@ -128,20 +157,14 @@
         const input = $('#kb-file-input');
 
         zone.addEventListener('click', () => input.click());
-        zone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            zone.classList.add('dragover');
-        });
+        zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('dragover'); });
         zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
         zone.addEventListener('drop', (e) => {
             e.preventDefault();
             zone.classList.remove('dragover');
             handleKBFiles(e.dataTransfer.files);
         });
-        input.addEventListener('change', () => {
-            handleKBFiles(input.files);
-            input.value = '';
-        });
+        input.addEventListener('change', () => { handleKBFiles(input.files); input.value = ''; });
 
         $('#btn-approve-all').addEventListener('click', approveAllPending);
         $('#btn-reject-all').addEventListener('click', rejectAllPending);
@@ -154,30 +177,55 @@
 
         const processing = $('#kb-processing');
         const processingText = $('#kb-processing-text');
-        processing.classList.remove('hidden');
 
         for (const file of files) {
             try {
+                processing.classList.remove('hidden');
                 processingText.textContent = `Reading ${file.name}...`;
                 const text = await extractTextFromFile(file);
+                processing.classList.add('hidden');
 
-                processingText.textContent = `Extracting Q&A pairs from ${file.name}...`;
-                const qa = await extractQAPairs(text, file.name);
-                state.pendingQA.push(...qa);
+                // Generate prompt for Claude
+                const prompt = buildKBExtractionPrompt(text, file.name);
+
+                showPromptModal(
+                    'Extract Q&A Pairs',
+                    `Step 1: Copy the prompt below and paste it into Claude. Step 2: Copy Claude's entire response and paste it back here.`,
+                    prompt,
+                    (responseText) => {
+                        try {
+                            const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+                            if (jsonMatch) {
+                                const pairs = JSON.parse(jsonMatch[0]);
+                                const qaPairs = pairs.map(p => ({
+                                    id: generateId(),
+                                    category: p.category || 'General',
+                                    question: p.question,
+                                    answer: p.answer,
+                                    source: file.name,
+                                    dateAdded: new Date().toISOString()
+                                }));
+                                state.pendingQA.push(...qaPairs);
+                                renderPendingQA();
+                                showToast(`Extracted ${qaPairs.length} Q&A pairs for review`, 'success');
+                            } else {
+                                throw new Error('No JSON array found');
+                            }
+                        } catch (e) {
+                            showToast('Could not parse the response. Make sure you copied the full response from Claude.', 'error');
+                        }
+                    }
+                );
             } catch (err) {
-                showToast(`Error processing ${file.name}: ${err.message}`, 'error');
+                processing.classList.add('hidden');
+                showToast(`Error reading ${file.name}: ${err.message}`, 'error');
             }
-        }
-
-        processing.classList.add('hidden');
-
-        if (state.pendingQA.length > 0) {
-            renderPendingQA();
         }
     }
 
-    async function extractQAPairs(text, fileName) {
-        const system = `You are an expert at analyzing RFP (Request for Proposal) documents for investment advisory services.
+    function buildKBExtractionPrompt(text, fileName) {
+        return `You are an expert at analyzing RFP (Request for Proposal) documents for investment advisory services.
+
 Extract all question-answer pairs from this document. Each pair should have:
 - category: A short category (e.g., "Firm Background", "Fees & Compensation", "Investment Philosophy", "Compliance", "Technology", "Client Service", "Experience", "References")
 - question: The question asked
@@ -185,29 +233,12 @@ Extract all question-answer pairs from this document. Each pair should have:
 
 Return ONLY a JSON array of objects with keys: category, question, answer.
 If the document is an RFP response, extract the Q&A pairs as they appear.
-If the document is a general company description, create Q&A pairs from the information (e.g., Q: "Describe your firm" A: [info from doc]).
-Be thorough — extract every distinguishable question and answer.`;
+If the document is a general company description, create Q&A pairs from the information.
+Be thorough — extract every distinguishable question and answer.
 
-        const result = await callClaude(system, `Document (${fileName}):\n\n${text.substring(0, 80000)}`, 8192);
+Document (${fileName}):
 
-        try {
-            const jsonMatch = result.match(/\[[\s\S]*\]/);
-            if (jsonMatch) {
-                const pairs = JSON.parse(jsonMatch[0]);
-                return pairs.map(p => ({
-                    id: generateId(),
-                    category: p.category || 'General',
-                    question: p.question,
-                    answer: p.answer,
-                    source: fileName,
-                    dateAdded: new Date().toISOString()
-                }));
-            }
-        } catch (e) {
-            console.error('Parse error:', e);
-        }
-        showToast('Could not parse Q&A pairs from this document.', 'error');
-        return [];
+${text.substring(0, 60000)}`;
     }
 
     // ===== Pending Q&A =====
@@ -234,6 +265,11 @@ Be thorough — extract every distinguishable question and answer.`;
                 </div>
             </div>
         `).join('');
+
+        // Click to expand
+        list.querySelectorAll('.qa-answer').forEach(el => {
+            el.addEventListener('click', () => el.classList.toggle('collapsed'));
+        });
     }
 
     window._approveQA = function (index) {
@@ -242,14 +278,12 @@ Be thorough — extract every distinguishable question and answer.`;
         saveKB();
         renderPendingQA();
         renderKBList();
-        updateKBCount();
         if (state.pendingQA.length === 0) $('#kb-pending').classList.add('hidden');
         showToast('Q&A pair added to knowledge base', 'success');
     };
 
     window._editPendingQA = function (index) {
-        const qa = state.pendingQA[index];
-        openQAModal(qa, index, true);
+        openQAModal(state.pendingQA[index], index, true);
     };
 
     window._rejectQA = function (index) {
@@ -264,8 +298,7 @@ Be thorough — extract every distinguishable question and answer.`;
         saveKB();
         $('#kb-pending').classList.add('hidden');
         renderKBList();
-        updateKBCount();
-        showToast(`All Q&A pairs added to knowledge base`, 'success');
+        showToast('All Q&A pairs added to knowledge base', 'success');
     }
 
     function rejectAllPending() {
@@ -280,8 +313,7 @@ Be thorough — extract every distinguishable question and answer.`;
     }
 
     function updateKBCount() {
-        const count = state.knowledgeBase.length;
-        $('#kb-count').textContent = count;
+        $('#kb-count').textContent = state.knowledgeBase.length;
     }
 
     function renderKBList() {
@@ -302,7 +334,6 @@ Be thorough — extract every distinguishable question and answer.`;
             return;
         }
 
-        // Group by category
         const grouped = {};
         filtered.forEach(qa => {
             const cat = qa.category || 'General';
@@ -333,7 +364,6 @@ Be thorough — extract every distinguishable question and answer.`;
             </div>
         `).join('');
 
-        // Click to expand/collapse answers
         list.querySelectorAll('.qa-answer').forEach(el => {
             el.addEventListener('click', () => el.classList.toggle('collapsed'));
         });
@@ -355,40 +385,21 @@ Be thorough — extract every distinguishable question and answer.`;
     // ===== Q&A Modal =====
     function initModals() {
         $$('.modal-close').forEach(btn => {
-            btn.addEventListener('click', () => {
-                btn.closest('.modal').classList.add('hidden');
-            });
+            btn.addEventListener('click', () => btn.closest('.modal').classList.add('hidden'));
         });
         $$('.modal-backdrop').forEach(bd => {
-            bd.addEventListener('click', () => {
-                bd.closest('.modal').classList.add('hidden');
-            });
+            bd.addEventListener('click', () => bd.closest('.modal').classList.add('hidden'));
         });
-
         $('#btn-modal-save').addEventListener('click', saveQAModal);
     }
 
     function openQAModal(qa = null, pendingIndex = null, isPending = false) {
         const modal = $('#modal-manual-qa');
-        const title = $('#modal-qa-title');
-        const catInput = $('#modal-qa-category');
-        const qInput = $('#modal-qa-question');
-        const aInput = $('#modal-qa-answer');
-
-        if (qa) {
-            title.textContent = 'Edit Q&A Pair';
-            catInput.value = qa.category || '';
-            qInput.value = qa.question || '';
-            aInput.value = qa.answer || '';
-            state.editingQAId = isPending ? { pending: pendingIndex } : qa.id;
-        } else {
-            title.textContent = 'Add Q&A Pair';
-            catInput.value = '';
-            qInput.value = '';
-            aInput.value = '';
-            state.editingQAId = null;
-        }
-
+        $('#modal-qa-title').textContent = qa ? 'Edit Q&A Pair' : 'Add Q&A Pair';
+        $('#modal-qa-category').value = qa?.category || '';
+        $('#modal-qa-question').value = qa?.question || '';
+        $('#modal-qa-answer').value = qa?.answer || '';
+        state.editingQAId = isPending ? { pending: pendingIndex } : (qa?.id || null);
         modal.classList.remove('hidden');
     }
 
@@ -403,29 +414,18 @@ Be thorough — extract every distinguishable question and answer.`;
         }
 
         if (state.editingQAId && typeof state.editingQAId === 'object' && 'pending' in state.editingQAId) {
-            // Editing a pending QA
             const idx = state.editingQAId.pending;
             state.pendingQA[idx] = { ...state.pendingQA[idx], category, question, answer };
             renderPendingQA();
         } else if (state.editingQAId) {
-            // Editing existing KB item
             const qa = state.knowledgeBase.find(q => q.id === state.editingQAId);
-            if (qa) {
-                qa.category = category;
-                qa.question = question;
-                qa.answer = answer;
-            }
+            if (qa) { qa.category = category; qa.question = question; qa.answer = answer; }
             saveKB();
             renderKBList();
         } else {
-            // New item
             state.knowledgeBase.push({
-                id: generateId(),
-                category,
-                question,
-                answer,
-                source: 'Manual Entry',
-                dateAdded: new Date().toISOString()
+                id: generateId(), category, question, answer,
+                source: 'Manual Entry', dateAdded: new Date().toISOString()
             });
             saveKB();
             renderKBList();
@@ -438,14 +438,12 @@ Be thorough — extract every distinguishable question and answer.`;
     // ===== KB Export / Import =====
     function initKBExportImport() {
         $('#btn-export-kb').addEventListener('click', () => {
-            const data = JSON.stringify(state.knowledgeBase, null, 2);
-            const blob = new Blob([data], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
+            const blob = new Blob([JSON.stringify(state.knowledgeBase, null, 2)], { type: 'application/json' });
             const a = document.createElement('a');
-            a.href = url;
+            a.href = URL.createObjectURL(blob);
             a.download = `rfp-knowledge-base-${new Date().toISOString().split('T')[0]}.json`;
             a.click();
-            URL.revokeObjectURL(url);
+            URL.revokeObjectURL(a.href);
             showToast('Knowledge base exported', 'success');
         });
 
@@ -454,17 +452,13 @@ Be thorough — extract every distinguishable question and answer.`;
             const file = e.target.files[0];
             if (!file) return;
             try {
-                const text = await file.text();
-                const data = JSON.parse(text);
-                if (!Array.isArray(data)) throw new Error('Invalid format');
-                const count = data.length;
+                const data = JSON.parse(await file.text());
+                if (!Array.isArray(data)) throw new Error();
                 state.knowledgeBase.push(...data.map(d => ({ ...d, id: d.id || generateId() })));
                 saveKB();
                 renderKBList();
-                showToast(`Imported ${count} Q&A pairs`, 'success');
-            } catch (err) {
-                showToast('Invalid knowledge base file', 'error');
-            }
+                showToast(`Imported ${data.length} Q&A pairs`, 'success');
+            } catch { showToast('Invalid knowledge base file', 'error'); }
             e.target.value = '';
         });
     }
@@ -475,63 +469,63 @@ Be thorough — extract every distinguishable question and answer.`;
         const input = $('#rfp-file-input');
 
         zone.addEventListener('click', () => input.click());
-        zone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            zone.classList.add('dragover');
-        });
+        zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('dragover'); });
         zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
         zone.addEventListener('drop', (e) => {
             e.preventDefault();
             zone.classList.remove('dragover');
             if (e.dataTransfer.files.length) handleRFPFile(e.dataTransfer.files[0]);
         });
-        input.addEventListener('change', () => {
-            if (input.files.length) handleRFPFile(input.files[0]);
-            input.value = '';
-        });
+        input.addEventListener('change', () => { if (input.files.length) handleRFPFile(input.files[0]); input.value = ''; });
 
         $('#btn-generate-responses').addEventListener('click', generateResponses);
     }
 
     async function handleRFPFile(file) {
         const processing = $('#rfp-processing');
-        const progressFill = $('#rfp-progress');
-        const progressLabel = $('#rfp-progress-label');
         const processingText = $('#rfp-processing-text');
 
         processing.classList.remove('hidden');
         $('#rfp-analysis').classList.add('hidden');
 
         try {
-            // Step 1: Extract text
             processingText.textContent = `Reading ${file.name}...`;
-            progressFill.style.width = '20%';
-            progressLabel.textContent = 'Extracting text from document...';
             const text = await extractTextFromFile(file);
             state.currentRFP = { text, fileName: file.name };
+            processing.classList.add('hidden');
 
-            // Step 2: Analyze RFP
-            processingText.textContent = 'Analyzing RFP requirements...';
-            progressFill.style.width = '50%';
-            progressLabel.textContent = 'AI is analyzing the prospect and identifying questions...';
-            await analyzeRFP(text, file.name);
+            // Generate analysis prompt
+            const prompt = buildRFPAnalysisPrompt(text, file.name);
 
-            progressFill.style.width = '100%';
-            progressLabel.textContent = 'Analysis complete!';
-
-            setTimeout(() => {
-                processing.classList.add('hidden');
-                $('#rfp-analysis').classList.remove('hidden');
-            }, 500);
-
+            showPromptModal(
+                'Analyze RFP',
+                'Step 1: Copy this prompt and paste it into Claude. Step 2: Copy Claude\'s entire JSON response and paste it back here.',
+                prompt,
+                (responseText) => {
+                    try {
+                        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+                        if (jsonMatch) {
+                            state.rfpAnalysis = JSON.parse(jsonMatch[0]);
+                            renderRFPAnalysis();
+                            $('#rfp-analysis').classList.remove('hidden');
+                            showToast('RFP analysis loaded successfully', 'success');
+                        } else {
+                            throw new Error('No JSON found');
+                        }
+                    } catch (e) {
+                        showToast('Could not parse the response. Make sure you copied the full JSON response.', 'error');
+                    }
+                }
+            );
         } catch (err) {
             processing.classList.add('hidden');
             showToast(`Error: ${err.message}`, 'error');
         }
     }
 
-    async function analyzeRFP(text, fileName) {
-        const system = `You are an expert at analyzing RFP (Request for Proposal) documents for investment advisory firms.
+    function buildRFPAnalysisPrompt(text, fileName) {
+        return `You are an expert at analyzing RFP (Request for Proposal) documents for investment advisory firms.
+
 Analyze this RFP and provide:
 
 1. A prospect profile with these fields:
@@ -549,32 +543,20 @@ Analyze this RFP and provide:
    - category: Category (Firm Background, Fees, Investment, Compliance, Service, Technology, etc.)
    - importance: "high", "medium", or "low" based on emphasis in the document
 
-Return as JSON with structure:
+Return ONLY valid JSON with this structure (no extra text before or after):
 {
-  "profile": { name, planType, estimatedAssets, priorities, tone, deadline, keyThemes },
-  "questions": [{ number, question, category, importance }]
-}`;
+  "profile": { "name": "", "planType": "", "estimatedAssets": "", "priorities": [], "tone": "", "deadline": "", "keyThemes": "" },
+  "questions": [{ "number": 1, "question": "", "category": "", "importance": "" }]
+}
 
-        const result = await callClaude(system, `RFP Document (${fileName}):\n\n${text.substring(0, 80000)}`, 8192);
+RFP Document (${fileName}):
 
-        try {
-            const jsonMatch = result.match(/\{[\s\S]*\}/);
-            if (jsonMatch) {
-                state.rfpAnalysis = JSON.parse(jsonMatch[0]);
-                renderRFPAnalysis();
-                return;
-            }
-        } catch (e) {
-            console.error('Parse error:', e);
-        }
-        throw new Error('Could not analyze RFP. Please try again.');
+${text.substring(0, 60000)}`;
     }
 
     function renderRFPAnalysis() {
         const { profile, questions } = state.rfpAnalysis;
 
-        // Render prospect profile
-        const analysisContent = $('#rfp-analysis-content');
         const profileItems = [
             { label: 'Organization', value: profile.name || 'Not specified' },
             { label: 'Plan Type', value: profile.planType || 'Not specified' },
@@ -583,7 +565,7 @@ Return as JSON with structure:
             { label: 'Tone', value: profile.tone || 'Professional' },
         ];
 
-        analysisContent.innerHTML = `
+        $('#rfp-analysis-content').innerHTML = `
             <div class="analysis-grid">
                 ${profileItems.map(item => `
                     <div class="analysis-item">
@@ -603,13 +585,10 @@ Return as JSON with structure:
                     <div class="analysis-item-label">Analysis Summary</div>
                     <div class="analysis-summary">${escapeHTML(profile.keyThemes)}</div>
                 </div>
-            ` : ''}
-        `;
+            ` : ''}`;
 
-        // Render questions
         $('#rfp-question-count').textContent = questions.length;
-        const qList = $('#rfp-questions-list');
-        qList.innerHTML = questions.map(q => `
+        $('#rfp-questions-list').innerHTML = questions.map(q => `
             <div class="question-preview">
                 <span class="question-number">${q.number}</span>
                 <div>
@@ -624,36 +603,54 @@ Return as JSON with structure:
     }
 
     // ===== Response Generation =====
-    async function generateResponses() {
+    function generateResponses() {
         if (!state.rfpAnalysis) return;
 
         const { profile, questions } = state.rfpAnalysis;
-        const processing = $('#rfp-processing');
-        const progressFill = $('#rfp-progress');
-        const progressLabel = $('#rfp-progress-label');
-        const processingText = $('#rfp-processing-text');
-
-        processing.classList.remove('hidden');
-        $('#rfp-analysis').classList.add('hidden');
-        processingText.textContent = 'Generating tailored responses...';
-
-        state.responses = [];
-        const totalQ = questions.length;
 
         // Build knowledge base context
         const kbContext = state.knowledgeBase.length > 0
             ? state.knowledgeBase.map(qa => `[${qa.category}] Q: ${qa.question}\nA: ${qa.answer}`).join('\n\n---\n\n')
-            : 'No past responses available.';
+            : 'No past responses available. Generate fresh professional responses.';
 
-        // Process in batches of 5 to balance speed and quality
-        const batchSize = 5;
-        for (let i = 0; i < totalQ; i += batchSize) {
-            const batch = questions.slice(i, i + batchSize);
-            const progress = Math.round(((i) / totalQ) * 100);
-            progressFill.style.width = `${progress}%`;
-            progressLabel.textContent = `Generating response ${i + 1} of ${totalQ}...`;
+        const prompt = buildResponseGenerationPrompt(profile, questions, kbContext);
 
-            const system = `You are a senior investment advisor at Fiduciary Experts, a registered investment advisory firm specializing in retirement plan consulting. You are drafting responses for an RFP.
+        showPromptModal(
+            'Generate RFP Responses',
+            'Step 1: Copy this prompt and paste it into Claude. Step 2: Copy Claude\'s entire JSON response and paste it back here. (For large RFPs, Claude may need to respond in parts — paste each part.)',
+            prompt,
+            (responseText) => {
+                try {
+                    const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+                    if (jsonMatch) {
+                        const responses = JSON.parse(jsonMatch[0]);
+                        state.responses = responses.map(r => {
+                            const q = questions.find(qq => qq.number === r.number);
+                            return {
+                                index: r.number,
+                                question: q ? q.question : `Question ${r.number}`,
+                                category: q ? q.category : 'General',
+                                answer: r.answer,
+                                confidence: r.confidence || 'medium',
+                                source: r.sourceRef || 'Generated',
+                                importance: q ? q.importance : 'medium'
+                            };
+                        });
+                        renderResponses();
+                        switchToTab('review');
+                        showToast(`${state.responses.length} responses loaded`, 'success');
+                    } else {
+                        throw new Error('No JSON array found');
+                    }
+                } catch (e) {
+                    showToast('Could not parse responses. Make sure you copied the full JSON response.', 'error');
+                }
+            }
+        );
+    }
+
+    function buildResponseGenerationPrompt(profile, questions, kbContext) {
+        return `You are a senior investment advisor at Fiduciary Experts, a registered investment advisory firm specializing in retirement plan consulting. You are drafting responses for an RFP.
 
 PROSPECT PROFILE:
 - Organization: ${profile.name || 'Unknown'}
@@ -672,57 +669,18 @@ INSTRUCTIONS:
 - Use the knowledge base answers as foundation but adapt to this prospect
 - Be specific and detailed, not generic
 - If the knowledge base has relevant info, use it. If not, write a strong general response
-- For each question, provide a confidence rating: "high" (direct KB match), "medium" (partial match), "low" (no KB match, generated fresh)
+- For each question, rate confidence: "high" (direct KB match), "medium" (partial match), "low" (no KB match, generated fresh)
 
-Return a JSON array with objects: { "number": N, "answer": "response text", "confidence": "high|medium|low", "sourceRef": "brief note on KB match or 'Generated'" }`;
+Return ONLY a valid JSON array (no extra text before or after):
+[
+  { "number": 1, "answer": "response text here", "confidence": "high", "sourceRef": "brief note on KB match or Generated" }
+]
 
-            const userMsg = `Generate responses for these RFP questions:\n\n${batch.map(q => `${q.number}. [${q.category}] ${q.question}`).join('\n\n')}`;
-
-            try {
-                const result = await callClaude(system, userMsg, 8192);
-                const jsonMatch = result.match(/\[[\s\S]*\]/);
-                if (jsonMatch) {
-                    const responses = JSON.parse(jsonMatch[0]);
-                    responses.forEach(r => {
-                        const q = questions.find(qq => qq.number === r.number);
-                        state.responses.push({
-                            index: r.number,
-                            question: q ? q.question : `Question ${r.number}`,
-                            category: q ? q.category : 'General',
-                            answer: r.answer,
-                            confidence: r.confidence || 'medium',
-                            source: r.sourceRef || 'Generated',
-                            importance: q ? q.importance : 'medium'
-                        });
-                    });
-                }
-            } catch (err) {
-                console.error('Batch error:', err);
-                // Add placeholder for failed questions
-                batch.forEach(q => {
-                    state.responses.push({
-                        index: q.number,
-                        question: q.question,
-                        category: q.category,
-                        answer: '[Error generating response. Click Regenerate to try again.]',
-                        confidence: 'low',
-                        source: 'Error',
-                        importance: q.importance
-                    });
-                });
-            }
-        }
-
-        progressFill.style.width = '100%';
-        progressLabel.textContent = 'All responses generated!';
-
-        setTimeout(() => {
-            processing.classList.add('hidden');
-            renderResponses();
-            switchToTab('review');
-        }, 500);
+QUESTIONS TO ANSWER:
+${questions.map(q => `${q.number}. [${q.category}${q.importance === 'high' ? ' - HIGH PRIORITY' : ''}] ${q.question}`).join('\n\n')}`;
     }
 
+    // ===== Render Responses =====
     function renderResponses() {
         const empty = $('#review-empty');
         const controls = $('#review-controls');
@@ -736,12 +694,10 @@ Return a JSON array with objects: { "number": N, "answer": "response text", "con
         empty.classList.add('hidden');
         controls.classList.remove('hidden');
 
-        // Update badge
         const badge = $('#response-count');
         badge.textContent = state.responses.length;
         badge.classList.remove('hidden');
 
-        // Toolbar
         const profile = state.rfpAnalysis?.profile;
         $('#review-prospect-name').textContent = profile?.name || 'RFP Response';
         const highConf = state.responses.filter(r => r.confidence === 'high').length;
@@ -749,7 +705,6 @@ Return a JSON array with objects: { "number": N, "answer": "response text", "con
         const lowConf = state.responses.filter(r => r.confidence === 'low').length;
         $('#review-stats').innerHTML = `${state.responses.length} responses — <span style="color:var(--success)">${highConf} high</span> / <span style="color:var(--warning)">${medConf} med</span> / <span style="color:var(--danger)">${lowConf} low</span> confidence`;
 
-        // Response cards
         const list = $('#review-list');
         list.innerHTML = state.responses
             .sort((a, b) => a.index - b.index)
@@ -794,38 +749,36 @@ Return a JSON array with objects: { "number": N, "answer": "response text", "con
         }
     };
 
-    window._regenerateOne = async function (index) {
+    window._regenerateOne = function (index) {
         const r = state.responses[index];
         const feedback = $(`#feedback-${index}`)?.value || '';
         const profile = state.rfpAnalysis?.profile;
 
-        const answerEl = $(`#answer-${index}`);
-        const originalText = answerEl.textContent;
-        answerEl.textContent = 'Regenerating...';
+        const kbContext = state.knowledgeBase.slice(0, 20).map(qa => `Q: ${qa.question}\nA: ${qa.answer}`).join('\n\n---\n\n');
 
-        const kbContext = state.knowledgeBase.length > 0
-            ? state.knowledgeBase.slice(0, 30).map(qa => `Q: ${qa.question}\nA: ${qa.answer}`).join('\n\n---\n\n')
-            : 'No past responses available.';
-
-        const system = `You are a senior investment advisor at Fiduciary Experts drafting an RFP response.
+        const prompt = `You are a senior investment advisor at Fiduciary Experts drafting an RFP response.
 Prospect: ${profile?.name || 'Unknown'} | Plan: ${profile?.planType || 'Retirement'} | Priorities: ${Array.isArray(profile?.priorities) ? profile.priorities.join(', ') : ''}
 
-Knowledge Base:\n${kbContext.substring(0, 20000)}
+Knowledge Base (past responses):
+${kbContext.substring(0, 15000)}
 
-Write a professional, tailored response. Return ONLY the response text, no JSON.`;
+Question: ${r.question}
 
-        const userMsg = `Question: ${r.question}\n\nPrevious answer: ${originalText}\n\n${feedback ? `User feedback: ${feedback}\n\n` : ''}Please write an improved response.`;
+Previous answer: ${r.answer}
 
-        try {
-            const result = await callClaude(system, userMsg, 2048);
-            state.responses[index].answer = result;
-            answerEl.textContent = result;
-            if ($(`#feedback-${index}`)) $(`#feedback-${index}`).value = '';
-            showToast('Response regenerated', 'success');
-        } catch (err) {
-            answerEl.textContent = originalText;
-            showToast('Regeneration failed: ' + err.message, 'error');
-        }
+${feedback ? `User feedback: ${feedback}\n` : ''}
+Write an improved response. Return ONLY the response text, no JSON wrapping.`;
+
+        showPromptModal(
+            `Regenerate Q${r.index}`,
+            'Copy this prompt into Claude, then paste the improved response back here.',
+            prompt,
+            (responseText) => {
+                state.responses[index].answer = responseText.trim();
+                renderResponses();
+                showToast('Response updated', 'success');
+            }
+        );
     };
 
     // ===== Global Feedback =====
@@ -840,47 +793,46 @@ Write a professional, tailored response. Return ONLY the response text, no JSON.
         $('#btn-export-word').addEventListener('click', exportToWord);
     }
 
-    async function applyGlobalFeedback() {
+    function applyGlobalFeedback() {
         const feedback = $('#global-feedback-text').value.trim();
-        if (!feedback) {
-            showToast('Please enter feedback', 'error');
-            return;
-        }
-
-        const processing = $('#rfp-processing');
-        const processingText = $('#rfp-processing-text');
-        const progressFill = $('#rfp-progress');
-        const progressLabel = $('#rfp-progress-label');
-
-        $('#global-feedback-panel').classList.add('hidden');
-        switchToTab('new-rfp');
-        processing.classList.remove('hidden');
-        processingText.textContent = 'Applying feedback and regenerating...';
+        if (!feedback) { showToast('Please enter feedback', 'error'); return; }
 
         const profile = state.rfpAnalysis?.profile;
-        const totalQ = state.responses.length;
+        const allResponses = state.responses.map(r => `Q${r.index}: ${r.question}\nA: ${r.answer}`).join('\n\n---\n\n');
 
-        for (let i = 0; i < totalQ; i++) {
-            const r = state.responses[i];
-            progressFill.style.width = `${Math.round((i / totalQ) * 100)}%`;
-            progressLabel.textContent = `Updating response ${i + 1} of ${totalQ}...`;
+        const prompt = `You are a senior investment advisor at Fiduciary Experts.
 
-            try {
-                const result = await callClaude(
-                    `You are a senior investment advisor at Fiduciary Experts. Apply the user's feedback to improve this RFP response. Return ONLY the improved response text.`,
-                    `Question: ${r.question}\n\nCurrent Answer: ${r.answer}\n\nGlobal Feedback to Apply: ${feedback}\n\nProspect: ${profile?.name || 'Unknown'}\n\nRewrite the answer incorporating the feedback.`,
-                    2048
-                );
-                state.responses[i].answer = result;
-            } catch (err) {
-                console.error(`Failed to update response ${i}:`, err);
+Apply this feedback across ALL of the following RFP responses: "${feedback}"
+
+Prospect: ${profile?.name || 'Unknown'} | Plan: ${profile?.planType || 'Retirement'}
+
+Current Responses:
+${allResponses.substring(0, 50000)}
+
+Rewrite ALL responses incorporating the feedback. Return ONLY a valid JSON array:
+[{ "number": 1, "answer": "improved response text" }]`;
+
+        showPromptModal(
+            'Apply Global Feedback',
+            'Copy this prompt into Claude, then paste the full JSON response back here.',
+            prompt,
+            (responseText) => {
+                try {
+                    const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+                    if (jsonMatch) {
+                        const updated = JSON.parse(jsonMatch[0]);
+                        updated.forEach(u => {
+                            const existing = state.responses.find(r => r.index === u.number);
+                            if (existing) existing.answer = u.answer;
+                        });
+                        renderResponses();
+                        showToast('All responses updated with feedback', 'success');
+                    } else { throw new Error(); }
+                } catch { showToast('Could not parse response. Try again.', 'error'); }
             }
-        }
+        );
 
-        processing.classList.add('hidden');
-        renderResponses();
-        switchToTab('review');
-        showToast('All responses updated with feedback', 'success');
+        $('#global-feedback-panel').classList.add('hidden');
     }
 
     // ===== Word Export =====
@@ -892,26 +844,21 @@ Write a professional, tailored response. Return ONLY the response text, no JSON.
 
         try {
             const { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType,
-                    BorderStyle, Table, TableRow, TableCell, WidthType, ShadingType,
-                    Header, Footer, ImageRun, PageBreak } = window.docx;
+                    BorderStyle, Header, Footer, ImageRun, PageBreak } = window.docx;
 
             const profile = state.rfpAnalysis?.profile;
             const title = profile?.name ? `RFP Response — ${profile.name}` : 'RFP Response';
 
-            // Try to load logo
             let logoData = null;
             try {
                 const logoResp = await fetch('assets/fiduciary-experts-logo.png');
                 if (logoResp.ok) logoData = await logoResp.arrayBuffer();
             } catch (e) { /* skip logo */ }
 
-            // Build header children
             const headerChildren = [];
             if (logoData) {
                 headerChildren.push(new Paragraph({
-                    children: [
-                        new ImageRun({ data: logoData, transformation: { width: 150, height: 50 }, type: 'png' })
-                    ],
+                    children: [new ImageRun({ data: logoData, transformation: { width: 150, height: 50 }, type: 'png' })],
                     alignment: AlignmentType.LEFT,
                     spacing: { after: 100 }
                 }));
@@ -922,18 +869,15 @@ Write a professional, tailored response. Return ONLY the response text, no JSON.
                 new Paragraph({ spacing: { before: 2000 } }),
                 new Paragraph({
                     children: [new TextRun({ text: title, bold: true, size: 56, color: '1a3a5c', font: 'Calibri' })],
-                    alignment: AlignmentType.CENTER,
-                    spacing: { after: 200 }
+                    alignment: AlignmentType.CENTER, spacing: { after: 200 }
                 }),
                 new Paragraph({
                     children: [new TextRun({ text: 'Prepared by Fiduciary Experts', size: 28, color: '666666', font: 'Calibri' })],
-                    alignment: AlignmentType.CENTER,
-                    spacing: { after: 100 }
+                    alignment: AlignmentType.CENTER, spacing: { after: 100 }
                 }),
                 new Paragraph({
                     children: [new TextRun({ text: new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }), size: 24, color: '999999', font: 'Calibri' })],
-                    alignment: AlignmentType.CENTER,
-                    spacing: { after: 400 }
+                    alignment: AlignmentType.CENTER, spacing: { after: 400 }
                 }),
             ];
 
@@ -945,25 +889,18 @@ Write a professional, tailored response. Return ONLY the response text, no JSON.
                 ].filter(Boolean);
 
                 if (details.length > 0) {
-                    titlePageParagraphs.push(
-                        new Paragraph({
-                            children: [new TextRun({ text: details.join('  |  '), size: 22, color: '888888', font: 'Calibri' })],
-                            alignment: AlignmentType.CENTER,
-                            spacing: { after: 200 }
-                        })
-                    );
+                    titlePageParagraphs.push(new Paragraph({
+                        children: [new TextRun({ text: details.join('  |  '), size: 22, color: '888888', font: 'Calibri' })],
+                        alignment: AlignmentType.CENTER, spacing: { after: 200 }
+                    }));
                 }
             }
 
-            titlePageParagraphs.push(
-                new Paragraph({ children: [new PageBreak()] })
-            );
+            titlePageParagraphs.push(new Paragraph({ children: [new PageBreak()] }));
 
-            // Q&A sections
+            // Q&A sections grouped by category
             const qaSections = [];
             const sortedResponses = [...state.responses].sort((a, b) => a.index - b.index);
-
-            // Group by category
             const grouped = {};
             sortedResponses.forEach(r => {
                 const cat = r.category || 'General';
@@ -972,7 +909,6 @@ Write a professional, tailored response. Return ONLY the response text, no JSON.
             });
 
             Object.entries(grouped).forEach(([category, items]) => {
-                // Category heading
                 qaSections.push(new Paragraph({
                     children: [new TextRun({ text: category, bold: true, size: 28, color: '1a3a5c', font: 'Calibri' })],
                     heading: HeadingLevel.HEADING_2,
@@ -981,7 +917,6 @@ Write a professional, tailored response. Return ONLY the response text, no JSON.
                 }));
 
                 items.forEach(r => {
-                    // Question
                     qaSections.push(new Paragraph({
                         children: [
                             new TextRun({ text: `${r.index}. `, bold: true, size: 22, color: 'c8a951', font: 'Calibri' }),
@@ -990,33 +925,21 @@ Write a professional, tailored response. Return ONLY the response text, no JSON.
                         spacing: { before: 300, after: 100 }
                     }));
 
-                    // Answer - split by newlines for proper paragraphs
-                    const answerParagraphs = r.answer.split('\n').filter(line => line.trim());
-                    answerParagraphs.forEach(para => {
+                    r.answer.split('\n').filter(line => line.trim()).forEach(para => {
                         qaSections.push(new Paragraph({
                             children: [new TextRun({ text: para, size: 22, color: '333333', font: 'Calibri' })],
-                            spacing: { after: 100 },
-                            indent: { left: 360 }
+                            spacing: { after: 100 }, indent: { left: 360 }
                         }));
                     });
 
-                    // Spacer
                     qaSections.push(new Paragraph({ spacing: { after: 200 } }));
                 });
             });
 
             const doc = new Document({
-                styles: {
-                    default: {
-                        document: {
-                            run: { font: 'Calibri', size: 22 }
-                        }
-                    }
-                },
+                styles: { default: { document: { run: { font: 'Calibri', size: 22 } } } },
                 sections: [{
-                    headers: {
-                        default: new Header({ children: headerChildren })
-                    },
+                    headers: { default: new Header({ children: headerChildren }) },
                     footers: {
                         default: new Footer({
                             children: [new Paragraph({
@@ -1030,20 +953,18 @@ Write a professional, tailored response. Return ONLY the response text, no JSON.
             });
 
             const blob = await Packer.toBlob(doc);
-            const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
-            a.href = url;
+            a.href = URL.createObjectURL(blob);
             a.download = `RFP Response - ${profile?.name || 'Draft'} - ${new Date().toISOString().split('T')[0]}.docx`;
             a.click();
-            URL.revokeObjectURL(url);
+            URL.revokeObjectURL(a.href);
 
             status.textContent = 'Document downloaded!';
             setTimeout(() => modal.classList.add('hidden'), 1000);
             showToast('Word document exported successfully', 'success');
-
         } catch (err) {
             console.error('Export error:', err);
-            status.textContent = 'Export failed. See console for details.';
+            status.textContent = 'Export failed.';
             setTimeout(() => modal.classList.add('hidden'), 2000);
             showToast('Export failed: ' + err.message, 'error');
         }

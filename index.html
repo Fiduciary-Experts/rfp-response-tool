@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>RFP Response Tool — Fiduciary Experts</title>
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com; font-src https://fonts.gstatic.com https://cdnjs.cloudflare.com; connect-src 'self'; img-src 'self' data: blob:;">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com; font-src https://fonts.gstatic.com https://cdnjs.cloudflare.com; img-src 'self' data: blob:;">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link rel="stylesheet" href="styles.css">
@@ -52,7 +52,7 @@
     <section id="tab-knowledge-base" class="tab-content active">
         <div class="section-header">
             <h2>Knowledge Base</h2>
-            <p>Upload past RFP responses to build your answer library. The AI will extract question-answer pairs automatically.</p>
+            <p>Upload past RFP responses to build your answer library. Extract question-answer pairs using Claude chat.</p>
         </div>
 
         <!-- Upload Area -->
@@ -217,6 +217,37 @@
             </div>
             <div class="modal-footer">
                 <button id="btn-modal-save" class="btn btn-primary">Save</button>
+                <button class="btn btn-outline modal-close">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Prompt / Paste Modal -->
+    <div id="modal-prompt" class="modal hidden">
+        <div class="modal-backdrop"></div>
+        <div class="modal-content" style="max-width:750px">
+            <div class="modal-header">
+                <h3 id="prompt-modal-title">Copy Prompt</h3>
+                <button class="modal-close"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <p id="prompt-step-info" style="font-size:0.85rem;color:var(--gray-600);margin-bottom:1rem"></p>
+
+                <label style="display:flex;align-items:center;justify-content:space-between">
+                    <span>Step 1: Copy this prompt into Claude</span>
+                    <button id="btn-copy-prompt" class="btn btn-accent btn-sm">
+                        <i class="fas fa-copy"></i> Copy Prompt
+                    </button>
+                </label>
+                <textarea id="prompt-output" rows="8" readonly style="width:100%;border:1.5px solid var(--gray-300);border-radius:var(--radius);padding:0.75rem;font-size:0.8rem;font-family:monospace;background:var(--gray-50);resize:vertical;margin-bottom:1rem"></textarea>
+
+                <label>Step 2: Paste Claude's response here</label>
+                <textarea id="paste-response" rows="8" placeholder="Paste Claude's full response here..." style="width:100%;border:1.5px solid var(--gray-300);border-radius:var(--radius);padding:0.75rem;font-size:0.85rem;font-family:inherit;resize:vertical"></textarea>
+            </div>
+            <div class="modal-footer">
+                <button id="btn-submit-response" class="btn btn-primary">
+                    <i class="fas fa-check"></i> Submit Response
+                </button>
                 <button class="btn btn-outline modal-close">Cancel</button>
             </div>
         </div>
