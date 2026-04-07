@@ -190,26 +190,21 @@
                     `Step 1: Copy the prompt below and paste it into Claude. Step 2: Copy Claude's entire response and paste it back here.`,
                     prompt,
                     (responseText) => {
-                        try {
-                            const jsonMatch = responseText.match(/\[[\s\S]*\]/);
-                            if (jsonMatch) {
-                                const pairs = JSON.parse(jsonMatch[0]);
-                                const qaPairs = pairs.map(p => ({
-                                    id: generateId(),
-                                    category: p.category || 'General',
-                                    question: p.question,
-                                    answer: p.answer,
-                                    source: file.name,
-                                    dateAdded: new Date().toISOString()
-                                }));
-                                state.pendingQA.push(...qaPairs);
-                                renderPendingQA();
-                                showToast(`Extracted ${qaPairs.length} Q&A pairs for review`, 'success');
-                            } else {
-                                throw new Error('No JSON array found');
-                            }
-                        } catch (e) {
-                            showToast('Could not parse the response. Make sure you copied the full response from Claude.', 'error');
+                        const pairs = parseJSONFromResponse(responseText, true);
+                        if (pairs && Array.isArray(pairs) && pairs.length > 0) {
+                            const qaPairs = pairs.map(p => ({
+                                id: generateId(),
+                                category: p.category || 'General',
+                                question: p.question || '',
+                                answer: p.answer || '',
+                                source: file.name,
+                                dateAdded: new Date().toISOString()
+                            })).filter(p => p.question && p.answer);
+                            state.pendingQA.push(...qaPairs);
+                            renderPendingQA();
+                            showToast(`Extracted ${qaPairs.length} Q&A pairs for review`, 'success');
+                        } else {
+                            showToast('Could not parse the response. Make sure you copied Claude\'s full response including the JSON array.', 'error');
                         }
                     }
                 );
@@ -502,18 +497,14 @@ ${text.substring(0, 60000)}`;
                 'Step 1: Copy this prompt and paste it into Claude. Step 2: Copy Claude\'s entire JSON response and paste it back here.',
                 prompt,
                 (responseText) => {
-                    try {
-                        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-                        if (jsonMatch) {
-                            state.rfpAnalysis = JSON.parse(jsonMatch[0]);
-                            renderRFPAnalysis();
-                            $('#rfp-analysis').classList.remove('hidden');
-                            showToast('RFP analysis loaded successfully', 'success');
-                        } else {
-                            throw new Error('No JSON found');
-                        }
-                    } catch (e) {
-                        showToast('Could not parse the response. Make sure you copied the full JSON response.', 'error');
+                    const parsed = parseJSONFromResponse(responseText, false);
+                    if (parsed && parsed.profile && parsed.questions) {
+                        state.rfpAnalysis = parsed;
+                        renderRFPAnalysis();
+                        $('#rfp-analysis').classList.remove('hidden');
+                        showToast('RFP analysis loaded successfully', 'success');
+                    } else {
+                        showToast('Could not parse the response. Make sure you copied Claude\'s full response.', 'error');
                     }
                 }
             );
@@ -620,30 +611,25 @@ ${text.substring(0, 60000)}`;
             'Step 1: Copy this prompt and paste it into Claude. Step 2: Copy Claude\'s entire JSON response and paste it back here. (For large RFPs, Claude may need to respond in parts — paste each part.)',
             prompt,
             (responseText) => {
-                try {
-                    const jsonMatch = responseText.match(/\[[\s\S]*\]/);
-                    if (jsonMatch) {
-                        const responses = JSON.parse(jsonMatch[0]);
-                        state.responses = responses.map(r => {
-                            const q = questions.find(qq => qq.number === r.number);
-                            return {
-                                index: r.number,
-                                question: q ? q.question : `Question ${r.number}`,
-                                category: q ? q.category : 'General',
-                                answer: r.answer,
-                                confidence: r.confidence || 'medium',
-                                source: r.sourceRef || 'Generated',
-                                importance: q ? q.importance : 'medium'
-                            };
-                        });
-                        renderResponses();
-                        switchToTab('review');
-                        showToast(`${state.responses.length} responses loaded`, 'success');
-                    } else {
-                        throw new Error('No JSON array found');
-                    }
-                } catch (e) {
-                    showToast('Could not parse responses. Make sure you copied the full JSON response.', 'error');
+                const parsed = parseJSONFromResponse(responseText, true);
+                if (parsed && Array.isArray(parsed) && parsed.length > 0) {
+                    state.responses = parsed.map((r, i) => {
+                        const q = questions.find(qq => qq.number === r.number);
+                        return {
+                            index: r.number || (i + 1),
+                            question: r.question || (q ? q.question : `Question ${i + 1}`),
+                            category: r.category || (q ? q.category : 'General'),
+                            answer: r.answer || '',
+                            confidence: r.confidence || 'medium',
+                            source: r.sourceRef || 'Generated',
+                            importance: q ? q.importance : 'medium'
+                        };
+                    });
+                    renderResponses();
+                    switchToTab('review');
+                    showToast(`${state.responses.length} responses loaded`, 'success');
+                } else {
+                    showToast('Could not parse responses. Make sure you copied Claude\'s full response.', 'error');
                 }
             }
         );
@@ -817,18 +803,17 @@ Rewrite ALL responses incorporating the feedback. Return ONLY a valid JSON array
             'Copy this prompt into Claude, then paste the full JSON response back here.',
             prompt,
             (responseText) => {
-                try {
-                    const jsonMatch = responseText.match(/\[[\s\S]*\]/);
-                    if (jsonMatch) {
-                        const updated = JSON.parse(jsonMatch[0]);
-                        updated.forEach(u => {
-                            const existing = state.responses.find(r => r.index === u.number);
-                            if (existing) existing.answer = u.answer;
-                        });
-                        renderResponses();
-                        showToast('All responses updated with feedback', 'success');
-                    } else { throw new Error(); }
-                } catch { showToast('Could not parse response. Try again.', 'error'); }
+                const parsed = parseJSONFromResponse(responseText, true);
+                if (parsed && Array.isArray(parsed) && parsed.length > 0) {
+                    parsed.forEach(u => {
+                        const existing = state.responses.find(r => r.index === u.number);
+                        if (existing) existing.answer = u.answer;
+                    });
+                    renderResponses();
+                    showToast('All responses updated with feedback', 'success');
+                } else {
+                    showToast('Could not parse response. Try again.', 'error');
+                }
             }
         );
 
@@ -968,6 +953,100 @@ Rewrite ALL responses incorporating the feedback. Return ONLY a valid JSON array
             setTimeout(() => modal.classList.add('hidden'), 2000);
             showToast('Export failed: ' + err.message, 'error');
         }
+    }
+
+    // ===== Robust Response Parser =====
+    // Handles JSON, markdown code blocks, AND plain text Q&A formats from Claude
+    function parseJSONFromResponse(text, expectArray) {
+        // Step 1: Strip markdown code blocks
+        let cleaned = text.replace(/```(?:json|JSON)?\s*\n?/g, '').replace(/```/g, '').trim();
+
+        // Step 2: Replace smart quotes
+        cleaned = cleaned
+            .replace(/[\u201C\u201D\u201E\u201F\u2033\u2036]/g, '"')
+            .replace(/[\u2018\u2019\u201A\u201B\u2032\u2035]/g, "'");
+
+        // Step 3: Try parsing as JSON directly
+        try {
+            const parsed = JSON.parse(cleaned);
+            if (expectArray ? Array.isArray(parsed) : typeof parsed === 'object') return parsed;
+        } catch (e) { /* continue */ }
+
+        // Step 4: Extract JSON from mixed text
+        const pattern = expectArray ? /\[[\s\S]*\]/ : /\{[\s\S]*\}/;
+        const match = cleaned.match(pattern);
+        if (match) {
+            try { return JSON.parse(match[0]); } catch (e) {
+                let fixed = match[0].replace(/,\s*([}\]])/g, '$1');
+                try { return JSON.parse(fixed); } catch (e2) { /* continue */ }
+            }
+        }
+
+        // Step 5: Parse plain-text Q&A format (bold markdown or plain)
+        // Handles: **Q: ...** A: ... OR Q: ... A: ... OR **Question** Answer
+        if (expectArray) {
+            const qaFromText = parseTextQA(text);
+            if (qaFromText.length > 0) return qaFromText;
+        }
+
+        return null;
+    }
+
+    // Parse plain-text Q&A pairs from various formats
+    function parseTextQA(text) {
+        const pairs = [];
+
+        // Pattern 1: **Q: question** \n A: answer (markdown bold)
+        const boldPattern = /\*\*Q:\s*(.*?)\*\*\s*\n\s*A:\s*([\s\S]*?)(?=\n\s*\*\*Q:|\n\s*---|\n\s*$)/gi;
+        let match;
+        while ((match = boldPattern.exec(text)) !== null) {
+            const question = match[1].trim();
+            const answer = match[2].trim();
+            if (question && answer) {
+                pairs.push({ category: categorizeQuestion(question), question, answer });
+            }
+        }
+        if (pairs.length > 0) return pairs;
+
+        // Pattern 2: Q: question \n A: answer (plain text, numbered or not)
+        const plainPattern = /(?:^|\n)\s*(?:\d+[\.\)]\s*)?Q(?:uestion)?[:\.]?\s*(.*?)\n\s*A(?:nswer)?[:\.]?\s*([\s\S]*?)(?=\n\s*(?:\d+[\.\)]\s*)?Q(?:uestion)?[:\.]|\n\s*---|\s*$)/gi;
+        while ((match = plainPattern.exec(text)) !== null) {
+            const question = match[1].trim();
+            const answer = match[2].trim();
+            if (question && answer) {
+                pairs.push({ category: categorizeQuestion(question), question, answer });
+            }
+        }
+        if (pairs.length > 0) return pairs;
+
+        // Pattern 3: Numbered questions with answers on next lines
+        // "1. Question text \n Answer text \n\n 2. Question text..."
+        const numberedPattern = /(?:^|\n)\s*(\d+)[\.\)]\s*(.*?)\n([\s\S]*?)(?=\n\s*\d+[\.\)]\s|\s*$)/g;
+        while ((match = numberedPattern.exec(text)) !== null) {
+            const question = match[2].trim();
+            const answer = match[3].trim();
+            if (question && answer && answer.length > 10) {
+                pairs.push({ category: categorizeQuestion(question), question, answer });
+            }
+        }
+
+        return pairs;
+    }
+
+    // Auto-categorize a question based on keywords
+    function categorizeQuestion(question) {
+        const q = question.toLowerCase();
+        if (/fee|cost|pric|compens|billing|rate/.test(q)) return 'Fees & Compensation';
+        if (/invest|fund|portfolio|asset|alloc|return|performance/.test(q)) return 'Investment';
+        if (/compli|regulat|audit|sec |irs |legal|fiduciary/.test(q)) return 'Compliance';
+        if (/technolog|software|system|platform|portal|online/.test(q)) return 'Technology';
+        if (/service|support|communication|report|meeting/.test(q)) return 'Client Service';
+        if (/experience|history|year|background|firm|staff|team|employee|founded/.test(q)) return 'Firm Background';
+        if (/reference|client|testimonial/.test(q)) return 'References';
+        if (/conflict|independent|disclos/.test(q)) return 'Compliance';
+        if (/educat|seminar|workshop|training|onboard/.test(q)) return 'Education';
+        if (/philosoph|approach|methodol|process|strategy/.test(q)) return 'Investment Philosophy';
+        return 'General';
     }
 
     // ===== Utilities =====
